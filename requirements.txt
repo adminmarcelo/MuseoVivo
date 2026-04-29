@@ -1,0 +1,6 @@
+streamlit
+spacy
+scikit-learn
+numpy
+SpeechRecognition
+gTTS
