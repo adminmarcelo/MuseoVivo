@@ -1,47 +1,55 @@
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from modules.db import BaseDatos  # Importamos para el auto-entrenamiento
 
 class MotorBusqueda:
     def __init__(self):
-        # Usamos TF-IDF para pesar los términos [cite: 48]
+        # Usamos TF-IDF para pesar los términos
         self.vectorizador = TfidfVectorizer()
-        self.corpus_procesado = []
-        self.metadata = [] # Para guardar títulos y fuentes
+        self.metadata = [] 
         self.tfidf_matrix = None
+        
+        # Auto-entrenamiento al inicializar
+        self.entrenar_con_db(BaseDatos())
 
     def entrenar_con_db(self, db_instancia):
-        """Carga el conocimiento desde SQLite y construye el índice invertido[cite: 47, 56]."""
-        db_instancia.cursor.execute("SELECT titulo, contenido, fuente FROM conocimiento")
-        filas = db_instancia.cursor.fetchall()
-        
-        textos = [f"{f[0]} {f[1]}" for f in filas] # Combinamos título y contenido
-        self.metadata = [{"titulo": f[0], "fuente": f[2], "contenido": f[1]} for f in filas]
-        
-        if textos:
+        """Carga el conocimiento desde SQLite y construye el índice."""
+        try:
+            db_instancia.cursor.execute("SELECT titulo, contenido, fuente FROM conocimiento")
+            filas = db_instancia.cursor.fetchall()
+            
+            if not filas:
+                print("⚠️ No hay documentos en la base de datos para entrenar.")
+                return
+
+            textos = [f"{f[0]} {f[1]}" for f in filas]
+            self.metadata = [{"titulo": f[0], "fuente": f[2], "contenido": f[1]} for f in filas]
+            
             self.tfidf_matrix = self.vectorizador.fit_transform(textos)
             print(f"✅ Motor de búsqueda entrenado con {len(textos)} documentos.")
+        except Exception as e:
+            print(f"❌ Error al entrenar el motor: {e}")
 
-    def buscar(self, consulta_tokens, top_n=3):
-        """Implementa búsqueda por similitud del coseno[cite: 49]."""
+    def buscar_mas_relevante(self, consulta_texto):
+        """
+        MÉTODO PUENTE PARA app.py: 
+        Implementa búsqueda por similitud del coseno y devuelve el mejor resultado.
+        """
         if self.tfidf_matrix is None:
-            return []
+            return {"contenido": "Error: Motor no entrenado"}, 0.0
 
-        # Convertimos la consulta del usuario a vector TF-IDF
-        query_str = " ".join(consulta_tokens)
-        query_vector = self.vectorizador.transform([query_str])
+        # Transformamos la consulta (el texto directo que viene de app.py)
+        query_vector = self.vectorizador.transform([consulta_texto])
         
         # Calculamos similitudes
         similitudes = cosine_similarity(query_vector, self.tfidf_matrix).flatten()
         
-        # Obtenemos los índices de los mejores resultados
-        indices_top = similitudes.argsort()[-top_n:][::-1]
+        # Obtenemos el índice del mejor resultado
+        idx_mejor = similitudes.argmax()
+        score = round(float(similitudes[idx_mejor]), 4)
         
-        resultados = []
-        for idx in indices_top:
-            if similitudes[idx] > 0.1: # Umbral mínimo de relevancia
-                res = self.metadata[idx].copy()
-                res["score"] = round(float(similitudes[idx]), 4)
-                resultados.append(res)
+        if score > 0.1: # Umbral mínimo de relevancia
+            return self.metadata[idx_mejor], score
         
-        return resultados
+        return {"contenido": "No se encontró información relevante."}, 0.0 
