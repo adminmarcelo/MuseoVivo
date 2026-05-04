@@ -8,10 +8,9 @@ from modules.search import MotorBusqueda
 from modules.tts import TTSEngine
 from modules.db import BaseDatos
 
-# 1. Configuración de la Interfaz (Fase 3 de la Hoja de Ruta)
+# 1. Configuración de la Interfaz
 st.set_page_config(page_title="MuseoVivo Chascomús", page_icon="🏛️", layout="wide")
 
-# Inicialización persistente de los módulos
 @st.cache_resource
 def inicializar_modulos():
     return ASREngine(), NLPProcessor(), ModeloNgramas(), MotorBusqueda(), TTSEngine(), BaseDatos()
@@ -19,58 +18,90 @@ def inicializar_modulos():
 asr, nlp, ngrams, search, tts, db = inicializar_modulos()
 
 # --- BARRA LATERAL: Estado y Métricas ---
-st.sidebar.title("📊 Estado del Sistema")
-st.sidebar.success("Base de Datos: 33 archivos indexados")
-st.sidebar.metric("Perplejidad Objetivo", "6.69")
+with st.sidebar:
+    st.title("📊 Estado del Sistema")
+    st.success("Base de Datos: 33 archivos indexados")
+    
+    col1, col2 = st.columns(2)
+    col1.metric("Objetivo PP", "6.69")
+    
+    if "ultima_pp" in st.session_state:
+        col2.metric("Última PP", f"{st.session_state.ultima_pp:.2f}")
 
 # --- CUERPO PRINCIPAL ---
 st.title("🏛️ MuseoVivo: Guía de Patrimonio")
-st.markdown("Interactuá con la historia de Chascomús a través de tu voz.")
+st.markdown("Interactuá con la historia de **Chascomús** a través de tu voz.")
 
-# 2. CAPTURA DE AUDIO (Bloque 4 - Web)
+# 2. CAPTURA DE AUDIO
 audio_value = st.audio_input("Presioná el micrófono para preguntar")
 
 if audio_value:
-    # Guardamos el audio temporalmente para procesarlo
     audio_path = "temp_query.wav"
     with open(audio_path, "wb") as f:
         f.write(audio_value.read())
     
-    # Iniciamos el pipeline de procesamiento
-    with st.status("Procesando consulta...", expanded=True) as status:
+    with st.status("Procesando consulta...", expanded=False) as status:
         start_time = time.time()
         
-        # A. ASR (Voz a Texto usando el archivo guardado)
-        st.write("🎙️ Transcribiendo audio...")
+        # A. ASR (Voz a Texto)
         texto_usuario = asr.transcribir_desde_archivo(audio_path)
         
         if texto_usuario:
             st.chat_message("user").write(texto_usuario)
             
-            # B. NLP & BÚSQUEDA (Bloques 1 y 3)
-            st.write("🔍 Buscando en el patrimonio...")
-            entidades = nlp.extraer_entidades(texto_usuario)
+            # B. NLP & BÚSQUEDA
             resultado, score = search.buscar_mas_relevante(texto_usuario)
             
-            # C. VALIDACIÓN (Bloque 2)
+            # C. VALIDACIÓN (N-Grams)
             pp = ngrams.calcular_perplejidad(texto_usuario)
+            st.session_state.ultima_pp = pp
             
-            # D. RESULTADOS Y TTS (Bloque 4)
-            st.write("🔊 Generando respuesta...")
-            if score > 0.3: # Umbral de similitud configurado
-                respuesta_texto = resultado['contenido']
-                st.chat_message("assistant").write(respuesta_texto)
-                
-                # Generamos y mostramos el audio de respuesta
-                path_audio_res = tts.sintetizar_para_web(respuesta_texto)
+            # D. RESULTADOS Y TTS
+            if score > 0.3:
+                with st.chat_message("assistant", avatar="🏛️"):
+                    st.subheader(f"📍 {resultado.get('titulo', 'Información Encontrada')}")
+                    
+                    contenido = resultado['contenido']
+                    cuerpo = contenido.split("Etiquetas:")[0].split("También podría gustarte")[0].strip()
+                    st.write(cuerpo)
+                    
+                    with st.expander("Ver ficha técnica y etiquetas"):
+                        st.caption(f"**Fuente:** {resultado.get('fuente')}")
+                        st.caption(f"**Confianza:** {score*100:.1f}%")
+
+                # E. AUDIO DE RESPUESTA
+                path_audio_res = tts.sintetizar_para_web(cuerpo)
                 st.audio(path_audio_res)
+
+                # --- SISTEMA DE FEEDBACK ESTILIZADO ---
+                st.markdown("---")
+                with st.container():
+                    st.write("¿Te resultó útil esta información?")
+                    col_f1, col_f2, _ = st.columns([1, 1, 4])
+                    
+                    with col_f1:
+                        if st.button("👍 Sí", use_container_width=True):
+                            db.registrar_feedback(texto_usuario, 1)
+                            st.toast("¡Gracias! Me alegra ayudar.", icon="😊")
+                    
+                    with col_f2:
+                        if st.button("👎 No", use_container_width=True):
+                            db.registrar_feedback(texto_usuario, -1)
+                            st.toast("Entendido, seguiré aprendiendo.", icon="🫡")
             else:
-                st.warning("No encontré información específica en el corpus histórico.")
+                st.warning("No encontré información específica. ¿Podrías intentar reformular?")
             
-            # E. PERSISTENCIA (Bloque 6)
+            # F. PERSISTENCIA Y MÉTRICA WER
             tiempo_resp = time.time() - start_time
-            db.guardar_interaccion(texto_usuario, score, pp, tiempo_resp)
             
-            status.update(label="Procesamiento completado", state="complete")
+            # Calculamos el WER comparando la transcripción con el título del resultado 
+            # como referencia de éxito semántico.
+            wer_actual = asr.calcular_wer(resultado.get('titulo', ''), texto_usuario)
+            
+            # Guardamos todo en la DB
+            db.guardar_interaccion(texto_usuario, score, pp, tiempo_resp)
+            # Nota: Asegúrate de que db.guardar_interaccion acepte el valor de WER si quieres trackearlo
+            
+            status.update(label="Respuesta generada", state="complete")
         else:
-            st.error("No se pudo procesar el audio. Por favor, intentá de nuevo.") 
+            st.error("No se pudo procesar el audio.") 
